@@ -40,7 +40,7 @@ htmlcov/
 .ai-dev-kit/
 
 # Claude Code — keep shared settings, ignore per-user overrides
-.claude/settings.local.json
+.claude/*
 
 # MCP config has user-specific absolute paths
 .mcp.json
