@@ -214,5 +214,3 @@ Before the workshop:
 During the workshop we will work from this starting point and aim to leave you with working assets in your own workspace.
 
 ---
-
-*Co-authored with Glean*
