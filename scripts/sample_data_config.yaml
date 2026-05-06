@@ -1,0 +1,104 @@
+# Sample data generator config for the GeoComply x Databricks AI Dev Kit workshop.
+#
+# Every knob below is editable. Each section explains *why* the rule exists so
+# attendees can tune the data to make their own risk-scoring logic interesting.
+
+seed: 42                      # why: deterministic output so attendees can compare results
+output_dir: data              # relative to repo root; absolute paths also supported
+
+time_range:
+  start: "2026-04-01T00:00:00Z"
+  end:   "2026-05-01T00:00:00Z"
+  # why: ~30 days gives enough history to compute a "baseline" period (first 21 days)
+  #      vs. a "current" period (last 9 days) for the behavioral-drift score.
+  baseline_days: 21
+
+# ---------------------------------------------------------------------------
+# Population
+# ---------------------------------------------------------------------------
+population:
+  num_normal_devices: 800       # why: bulk of traffic — clean, single-account, in-region
+  num_normal_accounts: 1000     # why: slightly more accounts than devices is realistic
+  events_per_device_per_day: 6  # why: poisson lambda; ~180 events/device over 30d window
+
+# Countries used for "normal" event geography. Lat/lon centroids are approximate
+# (city-level) and are jittered per event so a device's pings cluster near home.
+home_countries:
+  - { code: US, name: "United States",  lat: 40.7128,  lon: -74.0060  }   # New York
+  - { code: CA, name: "Canada",         lat: 43.6532,  lon: -79.3832  }   # Toronto
+  - { code: GB, name: "United Kingdom", lat: 51.5074,  lon:  -0.1278  }   # London
+  - { code: DE, name: "Germany",        lat: 52.5200,  lon:  13.4050  }   # Berlin
+  - { code: AU, name: "Australia",      lat: -33.8688, lon: 151.2093  }   # Sydney
+  - { code: BR, name: "Brazil",         lat: -23.5505, lon: -46.6333  }   # Sao Paulo
+
+# Countries that show up in *anomalous* events (geofence violations, impossible travel).
+foreign_countries:
+  - { code: RU, name: "Russia",   lat: 55.7558, lon:  37.6173 }
+  - { code: CN, name: "China",    lat: 39.9042, lon: 116.4074 }
+  - { code: NG, name: "Nigeria",  lat:  6.5244, lon:   3.3792 }
+  - { code: JP, name: "Japan",    lat: 35.6762, lon: 139.6503 }
+  - { code: ZA, name: "S. Africa",lat: -26.2041, lon:  28.0473 }
+
+event_types: [login, transaction, page_view, api_call, logout]
+channels:    [web, mobile_ios, mobile_android, api]
+
+# ---------------------------------------------------------------------------
+# Geofence config (drives the Jurisdiction / Geofence Mismatch score)
+# ---------------------------------------------------------------------------
+# Each account has an "allowed_country" set. Normal accounts get just their
+# home country; some accounts get a multi-country set to reflect travelers.
+geofence:
+  pct_accounts_with_multi_country_allowance: 0.10
+  # why: 10% of accounts are explicitly allowed in 2-3 countries (e.g. dual-residency);
+  #      the geofence score should NOT flag these for foreign-country events.
+
+# ---------------------------------------------------------------------------
+# IP reputation watchlist (drives the External Reputation score)
+# ---------------------------------------------------------------------------
+ip_watchlist:
+  num_bad_ips: 25
+  # why: 25 IPs across the /8 ranges below — small enough to be realistic,
+  #      large enough that a few normal devices will randomly hit them.
+  bad_ip_prefixes: ["185.220.", "45.95.",  "194.165.", "23.129.",  "171.25."]
+  # why: real-world ranges historically associated with Tor exit nodes / proxies.
+
+# ---------------------------------------------------------------------------
+# Planted anomalies — these drive the four behavioral risk scores.
+# Each anomaly type has a fixed count so attendees know exactly how many true
+# positives exist when validating their scoring.
+# ---------------------------------------------------------------------------
+anomalies:
+
+  impossible_travel:
+    num_devices: 15
+    # why: 15 devices that ping from two distant continents within 30 minutes.
+    #      Velocity / Impossible Travel score should rank these in the top N.
+    min_jump_km: 8000
+    max_minutes_between: 30
+
+  geofence_violation:
+    num_accounts: 25
+    # why: 25 accounts whose home/allowed region is country X but who generate
+    #      events from a foreign country. Drives the Jurisdiction score.
+    pct_foreign_events: 0.30   # ~30% of their events are out-of-region
+
+  device_sharing:
+    num_devices: 10
+    accounts_per_device: 6
+    # why: 10 devices used by 6 accounts each — clear outliers vs. the normal
+    #      ~1 account/device. Drives the Device Sharing score.
+
+  behavioral_drift:
+    num_accounts: 20
+    # why: 20 accounts whose first 21 days look "normal" (one country, one
+    #      hour-of-day band) and whose last 9 days suddenly shift to a new
+    #      country and/or a different time-of-day band. Drives the Behavioral
+    #      Drift score.
+    drift_country_shift: true
+    drift_hour_shift_hours: 8
+
+  watchlist_hits:
+    num_devices: 12
+    pct_events_from_bad_ip: 0.50
+    # why: 12 devices whose IPs come from the watchlist prefixes for ~half of
+    #      their events. Drives the External Reputation score.
