@@ -1,0 +1,51 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.python-version
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors / IDEs
+.idea/
+*.swp
+*.swo
+
+# Databricks
+.databricks/
+
+# AI Dev Kit (installed locally, not source)
+.ai-dev-kit/
+
+# Claude Code — keep shared settings, ignore per-user overrides
+.claude/settings.local.json
+
+# MCP config has user-specific absolute paths
+.mcp.json
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
