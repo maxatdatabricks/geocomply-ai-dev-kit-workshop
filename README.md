@@ -1,216 +1,134 @@
-# GeoComply × Databricks — AI Dev Kit Workshop Pre-Read
+# GeoComply × Databricks - AI Dev Kit Workshop
 
-## 1. Objective
+A 2-hour hands-on session: use AI Dev Kit from your IDE (Claude Code, OpenCode, Cursor) to stand up a small fingerprint-risk pipeline on Databricks, train a model on it, and expose it through Genie + MCP + a chat app.
 
-In a single 2-hour working session we will:
+## What's in this repo
 
-- Use AI Dev Kit from your existing IDE (OpenCode / Claude Code / Cursor) to build a small pipeline and risk-scored table on Databricks.
-- Train a simple model on those scores and track it with MLflow and Model Registry.
-- Configure a Genie Space for natural-language exploration of the risk-scored data.
-- Stand up an MCP server that exposes tools to:
-  - Query that Genie Space.
-  - Log feedback into MLflow (and optionally Lakebase).
-- Build a minimal conversational app (Databricks App) that:
-  - Acts as the chat UI front end.
-  - Calls the MCP server.
-  - Collects human-in-the-loop feedback and sends it to MLflow.
+```
+scripts/                     synthetic data generator + tunable config
+  sample_data_config.yaml      knobs for population, anomalies, watchlist
+  generate_sample_data.py      bootstraps deps, writes data/ outputs
+data/                        generator output (gitignored, regenerate locally)
+slides/                      workshop deck
+CLAUDE.md                    project conventions for AI agents
+README.md                    you are here
+```
 
-Lakebase is used as an optional backing store for conversation/feedback data and future extensions.
+The repo is intentionally small. **Sample data is not committed.** Every workshop run regenerates it from `scripts/sample_data_config.yaml`.
 
----
+## Architecture
 
-## 2. Audience and prerequisites
+```mermaid
+flowchart LR
+  subgraph local[Local]
+    gen[generate_sample_data.py]
+  end
+  subgraph uc[Unity Catalog]
+    bronze[(bronze_fingerprint_events<br/>+ bronze_allowed_regions<br/>+ bronze_ip_watchlist<br/>+ bronze_ground_truth)]
+    gold[(gold_fingerprint_risk)]
+    model[(MLflow model)]
+  end
+  subgraph serving[Serving]
+    genie[Genie Space]
+    mcp[MCP server<br/>query_space + log_feedback]
+    app[Databricks App<br/>chat UI]
+  end
+  gen --> bronze
+  bronze --> gold
+  gold --> model
+  gold --> genie
+  genie --> mcp
+  mcp --> app
+  app -.feedback.-> mcp
+  mcp -.traces.-> model
+```
 
-### Audience
+## Prerequisites
 
-Engineers and data scientists who:
+- Databricks workspace with permission to create tables/volumes in a sandbox catalog/schema, and to create a Genie Space.
+- AI Dev Kit installed in your IDE (Claude Code / OpenCode / Cursor). Install instructions are in the calendar invite.
+- Python 3.10+ locally.
 
-- Use Databricks for pipelines / ML.
-- Have OpenCode, Claude Code, Cursor, or similar AI coding tools.
+Target catalog/schema for the workshop: `gc_fpd_demo_catalog.geocomply_ai_workshop`. Naming conventions live in [CLAUDE.md](./CLAUDE.md).
 
-### Access and permissions
+## Activities
 
-- Databricks development workspace.
-- Ability to attach to compute or use a SQL warehouse.
-- Permissions to:
-  - Create tables/views in an agreed sandbox catalog/schema.
-  - Create a Genie Space (or equivalent, via an owner account).
+### 1. Generate data, load bronze, build the gold risk table
 
-### Tools
+**1a. Generate sample data locally.** Outputs land in `data/` (gitignored).
 
-- Working installation of at least one IDE: OpenCode, Claude Code, or Cursor.
-- Ability to install / configure AI Dev Kit for that IDE (we will provide install instructions in the calendar invite).
+```bash
+python scripts/generate_sample_data.py
+```
 
----
+Defaults produce ~1.8M events / 5,000 devices / 30 days. Tune `scripts/sample_data_config.yaml` to scale up or change anomaly counts. `--dry-run` previews without writing.
 
-## 3. Data and risk-scoring scenario
+The generator writes four files:
 
-We will use a synthetic fingerprint / geolocation dataset with fields such as:
+| File | Role |
+|---|---|
+| `fingerprint_events.parquet` | Raw event stream. One row per device ping. Pipeline input. |
+| `allowed_regions.csv` | Per-account geofence config. Reference table. |
+| `ip_watchlist.csv` | Bad-IP reputation list. Reference table. |
+| `ground_truth.csv` | Planted-anomaly labels. **Validation only. Never read by the scoring pipeline.** |
 
-- `device_id`, `account_id`
-- `ip_address`, `country`, `latitude`, `longitude`
-- `event_timestamp`
-- Event-type and channel fields as needed
+The generator plants *realistic raw behaviors* (intercontinental jumps inside 30 minutes, shared device IDs across accounts, watchlist IP usage, country/hour drift). The scoring pipeline rediscovers them from the raw signal. Labels are held out and only used to measure recall.
 
-From this we will build a per-device (or per-fingerprint) risk table with the following example scores:
+**1b. Load bronze tables.** Upload the four files to a UC volume and load each into a `bronze_*` Delta table.
 
-- **Velocity / Impossible Travel Score**
-  - Detects physically implausible movements.
-  - Derived from distances and time deltas between consecutive pings.
-- **Jurisdiction / Geofence Mismatch Score**
-  - Frequency of events outside an allowed region list.
-  - Uses a configuration table (Delta or Lakebase).
-- **Device Sharing Across Accounts Score**
-  - Number of distinct accounts per device in a time window.
-- **Behavioral Drift Score**
-  - Deviation of current behavior from a historical baseline.
-- **External Reputation / Watchlist Score**
-  - Status from an external reputation service, accessed via UC HTTP connection.
+**1c. Build `gold_fingerprint_risk`** (one row per device) with five score columns, computed by SQL/Spark from bronze tables only:
 
-The scores are simple enough to implement quickly but expressive enough to show the patterns we care about.
+| Score | Computed from | Range |
+|---|---|---|
+| `velocity_score` | max km/h between consecutive events on a device (haversine ÷ Δtime) | 0-1 |
+| `geofence_score` | fraction of events from countries not in any of the device's accounts' allowed_regions | 0-1 |
+| `device_sharing_score` | distinct accounts per device, log-scaled | 0-1 |
+| `behavioral_drift_score` | Jaccard distance between (country, hour-bucket) sets in the first 21 days vs. the last 9 | 0-1 |
+| `watchlist_score` | events on bad IPs (count or recency-weighted fraction) | 0-1 |
 
----
+**1d. Validate.** Each score's top-N should overlap with the corresponding `bronze_ground_truth` anomaly.
 
-## 4. Activity 1 — Build the risk-scored table with AI Dev Kit (IDE)
+**Output:** `gc_fpd_demo_catalog.geocomply_ai_workshop.gold_fingerprint_risk`.
 
-**Goal:** Use agentic coding in your IDE to produce a curated risk table on Databricks.
+### 2. Train a model and wire MLflow
 
-**Steps (high level):**
+- Add a synthetic `high_risk` label (rule on the five scores, or randomization).
+- Train a simple classifier on `gold_fingerprint_risk`. Log params, metrics, and artifact to MLflow. Register a model version.
+- Define the feedback payload schema you will log later: `query_text`, `genie_answer`, `label`, `model_version`, `timestamp`, optional `device_id`/`account_id`.
 
-- Use AI Dev Kit tools from your IDE to scaffold a notebook or pipeline that:
-  - Reads the synthetic input data into a bronze Delta table.
-- Prompt AI Dev Kit to:
-  - Create a silver/gold table `fingerprint_risk` with one row per device/fingerprint.
-  - Implement the five scores above as columns on that table.
-- Validate that the resulting table looks reasonable (row counts, basic distributions).
+**Output:** an MLflow experiment with a registered model version and an agreed feedback schema.
 
-**Output:**
+### 3. Configure a Genie Space over the risk table
 
-- A Delta table (e.g. `<catalog>.<schema>.fingerprint_risk`) with all risk scores present.
+- Create a Genie Space connected to `gold_fingerprint_risk` (or a view).
+- Add a one-line description and ~5 sample questions.
+- Verify Genie produces runnable SQL whose answers match a hand-written validation query.
 
----
+**Output:** Genie Space ID + URL.
 
-## 5. Activity 2 — Train a model and wire in MLflow and Registry
+### 4. Stand up the MCP server
 
-**Goal:** Train a basic model on the risk-scored data and prepare MLflow to accept feedback later.
+Two tools, minimum:
 
-**Steps:**
+- `query_space(space_id, query_text)` → forwards to Genie, returns answer (and SQL if available).
+- `log_feedback(query_text, genie_answer, label, timestamp, ...)` → writes a record to MLflow as a trace, and/or appends to a `gold_feedback_events` table (Delta or Lakebase).
 
-- Add a simple synthetic label (for example, `high_risk` flag) based on a rule or randomization.
-- From your IDE, use AI Dev Kit to:
-  - Generate a training script or notebook that:
-    - Reads `fingerprint_risk`.
-    - Trains a simple classifier or risk-ranking model.
-  - Add MLflow tracking:
-    - Log parameters, metrics, and the model artifact.
-- Register the model into Model Registry.
-- Define a feedback payload that MLflow will accept later, for example:
-  - `query_text`
-  - `genie_answer`
-  - `label` (e.g. helpful / unhelpful / incorrect / high-value)
-  - `model_version`
-  - `timestamp`
-  - Optional: `device_id` / `account_id`
+**Output:** an MCP endpoint URL exposing both tools.
 
-**Output:**
+### 5. Build the conversational app
 
-- An MLflow experiment with at least one run.
-- A registered model version.
-- An agreed feedback schema (fields and table/experiment names).
+A Databricks App with:
 
----
+- Minimal chat UI (input + history).
+- On send: call `query_space` via MCP, render the answer.
+- On thumbs-up/down: call `log_feedback` via MCP.
+- Optional: Lakebase as the persistence layer for feedback events and chat transcripts.
 
-## 6. Activity 3 — Configure the Genie Space over the risk table
+**Output:** working app URL. Chat over fingerprint risk data with HITL feedback flowing back to MLflow.
 
-**Goal:** Make the risk-scored data explorable via a Genie Space.
+## Pre-workshop checklist
 
-**Steps:**
-
-- Use AI Dev Kit's Genie-related skills to:
-  - Create a Genie Space that:
-    - Connects to the `fingerprint_risk` table or a simple view on top of it.
-  - Add:
-    - A short description of the space's purpose (fingerprint risk exploration).
-    - A handful of sample questions (e.g., "List the devices with highest velocity score in country X over the last 24 hours").
-- Verify that Genie can:
-  - Generate runnable SQL against the risk table.
-  - Return answers that match simple validation queries.
-
-**Output:**
-
-- A Genie Space ID and URL for the "fingerprint risk" space.
-
----
-
-## 7. Activity 4 — Stand up the MCP server for Genie + feedback
-
-**Goal:** Expose the Genie Space and feedback logging via MCP tools.
-
-**Steps:**
-
-- Implement or configure an MCP server (using AI Dev Kit patterns) that provides at least two tools:
-  - `query_space` (name indicative only):
-    - Inputs: `space_id`, `query_text`, optional context.
-    - Behavior: sends the query to the Genie Space and returns the answer and, if available, the generated SQL.
-  - `log_feedback`:
-    - Inputs: at minimum `query_text`, `genie_answer`, `label`, `timestamp`, and optionally `model_version`, device/account identifiers.
-    - Behavior:
-      - Logs a record into MLflow as a trace/evaluation row, and/or
-      - Inserts a record into a feedback table (Delta or Lakebase).
-- (Optional) Use Lakebase as the target for a `feedback_events` table and, if desired, as a backing store for conversation state.
-
-**Output:**
-
-- An MCP endpoint URL and a tool list that includes `query_space` and `log_feedback`.
-- A place for feedback records (MLflow experiment and/or feedback table).
-
----
-
-## 8. Activity 5 — Build the conversational app (custom agent + chat UI)
-
-**Goal:** Create a simple chat front end that uses the MCP server and logs HITL feedback.
-
-**Steps:**
-
-- Use AI Dev Kit app-oriented skills to scaffold a Databricks App that:
-  - Renders a minimal chat interface:
-    - Text input for user messages.
-    - Chat history display with alternating user/assistant messages.
-- Implement app logic so that:
-  - On each user message:
-    - The app calls the MCP server's `query_space` tool with:
-      - The Genie `space_id`.
-      - The user's `query_text`.
-    - Displays the returned Genie answer (and optionally the SQL) in the chat history.
-  - On feedback:
-    - Provide a simple UI element (e.g., thumbs up/down, or a dropdown) for each answer.
-    - When feedback is given, call the MCP server's `log_feedback` tool with:
-      - The original `query_text`.
-      - The `genie_answer`.
-      - The chosen label.
-      - Optional metadata (model version, device/account, timestamp).
-- If Lakebase is used:
-  - Configure the app (or MCP) to use a Lakebase table as the persistence layer for feedback events and, optionally, chat transcripts.
-
-**Output:**
-
-- A working Databricks App URL.
-- A chat experience that:
-  - Uses Genie via MCP for answers over fingerprint risk data.
-  - Sends human feedback to MLflow (and optionally Lakebase) for later analysis and evaluation.
-
----
-
-## 9. How to prepare
-
-Before the workshop:
-
-- Confirm workspace access and that you can create objects in the agreed sandbox catalog/schema.
-- Ensure your IDE (OpenCode / Claude Code / Cursor) is installed and working.
-- Install or test AI Dev Kit in your IDE (we'll send exact commands in the invite).
-- If you expect to use Lakebase:
-  - Confirm there is a Lakebase instance available to use as a resource for the Databricks App, or that we have a plan to create one.
-
-During the workshop we will work from this starting point and aim to leave you with working assets in your own workspace.
-
----
+- Workspace access confirmed. You can create objects in `gc_fpd_demo_catalog.geocomply_ai_workshop`.
+- AI Dev Kit working in your IDE.
+- Python 3.10+ available. `python scripts/generate_sample_data.py --dry-run` runs without errors (smoke-test the generator before the session).
+- (If using Lakebase) a Lakebase instance is available, or we have a plan to create one.

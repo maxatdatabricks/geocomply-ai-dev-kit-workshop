@@ -17,9 +17,10 @@ time_range:
 # Population
 # ---------------------------------------------------------------------------
 population:
-  num_normal_devices: 800       # why: bulk of traffic — clean, single-account, in-region
-  num_normal_accounts: 1000     # why: slightly more accounts than devices is realistic
-  events_per_device_per_day: 6  # why: poisson lambda; ~180 events/device over 30d window
+  num_normal_devices: 5000      # why: bulk of traffic — clean, single-account, in-region
+  num_normal_accounts: 6000     # why: slightly more accounts than devices is realistic
+  events_per_device_per_day: 12 # why: poisson lambda; ~360 events/device over 30d window
+                                #      → ~1.8M events total at default population
 
 # Countries used for "normal" event geography. Lat/lon centroids are approximate
 # (city-level) and are jittered per event so a device's pings cluster near home.
