@@ -26,7 +26,10 @@ flowchart LR
   subgraph uc[Unity Catalog]
     bronze[(bronze_fingerprint_events<br/>+ bronze_allowed_regions<br/>+ bronze_ip_watchlist<br/>+ bronze_ground_truth)]
     gold[(gold_fingerprint_risk)]
-    model[(MLflow model)]
+  end
+  subgraph mlflow[MLflow]
+    model[(Registered model)]
+    traces[(Trace experiment<br/>+ feedback)]
   end
   subgraph serving[Serving]
     genie[Genie Space]
@@ -40,7 +43,7 @@ flowchart LR
   genie --> mcp
   mcp --> app
   app -.feedback.-> mcp
-  mcp -.traces.-> model
+  mcp -.traces.-> traces
 ```
 
 ## Prerequisites
@@ -49,11 +52,13 @@ flowchart LR
 - AI Dev Kit installed in your IDE (Claude Code / OpenCode / Cursor). Install instructions are in the calendar invite.
 - Python 3.10+ locally.
 
-Target catalog/schema for the workshop: `gc_fpd_demo_catalog.geocomply_ai_workshop`. Naming conventions live in [CLAUDE.md](./CLAUDE.md).
+Pick your own catalog, schema, and volume for the workshop. The instructions below use `<catalog>.<schema>` and `<volume>` as placeholders. Naming conventions live in [CLAUDE.md](./CLAUDE.md).
 
 ## Activities
 
 ### 1. Generate data, load bronze, build the gold risk table
+
+This activity produces a **continuously-refreshing pipeline**, not a one-off load. Bronze tables ingest new generator output incrementally as files land in the volume. Gold refreshes on top. Re-running the generator should produce updated risk scores without manual intervention.
 
 **1a. Generate sample data locally.** Outputs land in `data/` (gitignored).
 
@@ -74,9 +79,9 @@ The generator writes four files:
 
 The generator plants *realistic raw behaviors* (intercontinental jumps inside 30 minutes, shared device IDs across accounts, watchlist IP usage, country/hour drift). The scoring pipeline rediscovers them from the raw signal. Labels are held out and only used to measure recall.
 
-**1b. Load bronze tables.** Upload the four files to a UC volume and load each into a `bronze_*` Delta table.
+**1b. Load bronze tables.** Upload the four files to a UC volume. Build incremental `bronze_*` ingestion that picks up new files as the generator re-runs (Auto Loader or equivalent). One bronze table per file.
 
-**1c. Build `gold_fingerprint_risk`** (one row per device) with five score columns, computed by SQL/Spark from bronze tables only:
+**1c. Build `gold_fingerprint_risk`** (one row per device) as a refreshable derived table with five score columns, computed from bronze tables only:
 
 | Score | Computed from | Range |
 |---|---|---|
@@ -88,15 +93,14 @@ The generator plants *realistic raw behaviors* (intercontinental jumps inside 30
 
 **1d. Validate.** Each score's top-N should overlap with the corresponding `bronze_ground_truth` anomaly.
 
-**Output:** `gc_fpd_demo_catalog.geocomply_ai_workshop.gold_fingerprint_risk`.
+**Output:** `<catalog>.<schema>.gold_fingerprint_risk`.
 
 ### 2. Train a model and wire MLflow
 
 - Add a synthetic `high_risk` label (rule on the five scores, or randomization).
-- Train a simple classifier on `gold_fingerprint_risk`. Log params, metrics, and artifact to MLflow. Register a model version.
-- Define the feedback payload schema you will log later: `query_text`, `genie_answer`, `label`, `model_version`, `timestamp`, optional `device_id`/`account_id`.
+- Train a simple classifier on `gold_fingerprint_risk`. Track the run in MLflow and register the resulting model in Unity Catalog so it has an addressable, versioned identity.
 
-**Output:** an MLflow experiment with a registered model version and an agreed feedback schema.
+**Output:** an MLflow experiment with at least one registered model version, ready for downstream tools to reference.
 
 ### 3. Configure a Genie Space over the risk table
 
@@ -110,25 +114,24 @@ The generator plants *realistic raw behaviors* (intercontinental jumps inside 30
 
 Two tools, minimum:
 
-- `query_space(space_id, query_text)` → forwards to Genie, returns answer (and SQL if available).
-- `log_feedback(query_text, genie_answer, label, timestamp, ...)` → writes a record to MLflow as a trace, and/or appends to a `gold_feedback_events` table (Delta or Lakebase).
+- `query_space`: lets a caller ask the Genie Space a question and get back an answer. Each call should produce an inspectable record of what was asked and what came back, so the team can review behavior later without touching the chat UI.
+- `log_feedback`: lets a caller record a user verdict (e.g. thumbs-up / thumbs-down) on a specific answer. The verdict should attach to the corresponding `query_space` record so the two are joined automatically in your LLMOps tooling.
 
-**Output:** an MCP endpoint URL exposing both tools.
+**Output:** an MCP endpoint URL exposing both tools, with calls and feedback flowing into your team s LLMOps system of record (e.g. MLflow Traces).
 
 ### 5. Build the conversational app
 
 A Databricks App with:
 
 - Minimal chat UI (input + history).
-- On send: call `query_space` via MCP, render the answer.
-- On thumbs-up/down: call `log_feedback` via MCP.
-- Optional: Lakebase as the persistence layer for feedback events and chat transcripts.
+- On send: ask the Genie Space via the MCP server, render the answer.
+- On thumbs-up / thumbs-down: record the verdict via the MCP server so it lands on the same record as the underlying call.
 
-**Output:** working app URL. Chat over fingerprint risk data with HITL feedback flowing back to MLflow.
+**Output:** working app URL. Conversations and human verdicts are visible in your LLMOps tooling without further wiring, so the team can spot bad answers, find patterns, and feed reviewed examples back into evaluation.
 
 ## Pre-workshop checklist
 
-- Workspace access confirmed. You can create objects in `gc_fpd_demo_catalog.geocomply_ai_workshop`.
+- Workspace access confirmed. You can create catalogs/schemas/volumes/tables in your chosen workspace.
 - AI Dev Kit working in your IDE.
 - Python 3.10+ available. `python scripts/generate_sample_data.py --dry-run` runs without errors (smoke-test the generator before the session).
 - (If using Lakebase) a Lakebase instance is available, or we have a plan to create one.
