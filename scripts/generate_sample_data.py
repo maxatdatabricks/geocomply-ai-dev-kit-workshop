@@ -265,17 +265,28 @@ def _plant_geofence_violations(
     cfg = ctx.cfg["anomalies"]["geofence_violation"]
     rng = ctx.rng
     foreign = ctx.cfg["foreign_countries"]
-    chosen = accounts.sample(cfg["num_accounts"], random_state=rng.randint(0, 2**31))
+    duration_days = (ctx.end - ctx.start).days
+    expected_events = ctx.cfg["population"]["events_per_device_per_day"] * duration_days
+
+    # Only plant on accounts that already have a primary device. Keeps device
+    # IDs in the standard dev_NNNNNN range and ensures foreign events mix with
+    # the device s normal traffic so geofence_score lands in (0, 1) rather than
+    # pinning to 1.0 on synthesized device-only-foreign rows.
     dev_by_acct = devices.groupby("primary_account_id")["device_id"].apply(list).to_dict()
+    accts_with_device = accounts[accounts["account_id"].isin(dev_by_acct)]
+    chosen = accts_with_device.sample(cfg["num_accounts"], random_state=rng.randint(0, 2**31))
+
+    pct_min = cfg["min_pct_foreign_events"]
+    pct_max = cfg["max_pct_foreign_events"]
 
     rows = []
     for _, a in chosen.iterrows():
-        # Find a device for this account; if none, fabricate a device_id.
-        dev_id = (dev_by_acct.get(a["account_id"]) or [f"dev_extra_{a['account_id']}"])[0]
-        n_foreign = max(3, int(20 * cfg["pct_foreign_events"]))
+        dev_id = dev_by_acct[a["account_id"]][0]
+        pct = rng.uniform(pct_min, pct_max)
+        n_foreign = max(3, int(expected_events * pct))
         for _ in range(n_foreign):
             country = rng.choice(foreign)
-            ts = ctx.start + timedelta(seconds=rng.randint(0, (ctx.end - ctx.start).days * 86400))
+            ts = ctx.start + timedelta(seconds=rng.randint(0, duration_days * 86400))
             lat, lon = jitter_latlon(country["lat"], country["lon"], rng)
             rows.append(
                 {
@@ -335,12 +346,15 @@ def _plant_behavioral_drift(
     cfg = ctx.cfg["anomalies"]["behavioral_drift"]
     rng = ctx.rng
     foreign = ctx.cfg["foreign_countries"]
-    chosen = accounts.sample(cfg["num_accounts"], random_state=rng.randint(0, 2**31))
+    # Only plant on accounts that already have a primary device. Keeps device
+    # IDs in the standard dev_NNNNNN range; no fabricated dev_extra_* rows.
     dev_by_acct = devices.groupby("primary_account_id")["device_id"].apply(list).to_dict()
+    accts_with_device = accounts[accounts["account_id"].isin(dev_by_acct)]
+    chosen = accts_with_device.sample(cfg["num_accounts"], random_state=rng.randint(0, 2**31))
 
     rows = []
     for _, a in chosen.iterrows():
-        dev_id = (dev_by_acct.get(a["account_id"]) or [f"dev_extra_{a['account_id']}"])[0]
+        dev_id = dev_by_acct[a["account_id"]][0]
 
         # Baseline: 21 days, home country, business-hours (9-17 UTC)
         for _ in range(rng.randint(15, 25)):
@@ -470,7 +484,8 @@ def write_outputs(tables: dict[str, pd.DataFrame], out_dir: Path, fmt: str) -> N
         base = out_dir / name_map[key]
         if key == "events" and fmt == "parquet":
             path = base.with_suffix(".parquet")
-            df.to_parquet(path, index=False)
+            # us precision so Spark/Photon can read it (rejects pyarrow's default ns timestamps).
+            df.to_parquet(path, index=False, coerce_timestamps="us", allow_truncated_timestamps=True)
         else:
             path = base.with_suffix(".csv")
             df.to_csv(path, index=False)

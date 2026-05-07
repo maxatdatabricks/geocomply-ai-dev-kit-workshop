@@ -80,8 +80,11 @@ anomalies:
   geofence_violation:
     num_accounts: 25
     # why: 25 accounts whose home/allowed region is country X but who generate
-    #      events from a foreign country. Drives the Jurisdiction score.
-    pct_foreign_events: 0.30   # ~30% of their events are out-of-region
+    #      a fraction of their events from a foreign country. The fraction is
+    #      sampled per account from [min_pct, max_pct] so geofence_score does
+    #      not pin to a single value across all planted accounts.
+    min_pct_foreign_events: 0.15
+    max_pct_foreign_events: 0.35
 
   device_sharing:
     num_devices: 10
